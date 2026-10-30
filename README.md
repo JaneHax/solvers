@@ -14,7 +14,7 @@ class inside the deadline, then reporting the campaign as impossible.
 | Directory | Gate type | Tool | Measured |
 |---|---|---|---|
 | `nonogram/` | Nonogram / picross grid with row+column run clues | `nonobp` (C) + parallel runners | 112×112 board in 5-8 s single-thread |
-| `sat/` | Boolean constraint instances (SAT benchmarks) | `wsatk`, `exactksat` (C) | planted 5-SAT 384 vars in 0.47 s |
+| `sat/` | Boolean constraint instances (SAT benchmarks) | `wsatk`, `exactksat` (C) + `.github/workflows/` farm | planted 5-SAT 384 vars in 0.47 s |
 | `pow/` | Hash-preimage proof of work | 3 miners (C, pthreads) | 32-bit keccak nonce ≈ 86 s on 256 cores |
 | `sliding/` | 4×4 slide puzzle with a seed-derived scramble | `puzzle15_core.py` (IDA*) | 30-42 move boards in < 1 s |
 | `arith/` | Obfuscated arithmetic word problems | `arith_captcha.py` (Python) | one-shot verification codes |
@@ -103,6 +103,42 @@ garbage.
 by a fixed count per line. Taking the first three tokens misaligns the whole
 formula when k ≠ 3, and the symptom is not a crash: every solver stalls a
 handful of clauses short, forever, and it looks like "the instance is unsat".
+
+### Free parallel farm on GitHub Actions
+
+Renting a box is often the wrong spend. `.github/workflows/` runs the same CNF
+across **20 parallel shards on free `ubuntu-latest` runners** — 20 × 6 min of
+compute for nothing, which is enough to cover a 600 s deadline without a VPS.
+
+| Workflow | What it runs |
+|---|---|
+| `ls.yml` | 20 weighted-local-search shards, whole budget on the class that gets close |
+| `kissat.yml` | Kissat per shard, one seed/config each; `--sat` preset is tuned for planted instances |
+| `cdcl.yml` | Complete solvers (`Cadical195`, `Glucose4`, `Minisat22`, `MapleChrono`), one config per shard |
+| `hybrid.yml` | Local search first, then Kissat in the same job — uses the concurrency cap twice over |
+| `solve.yml` | Plain local-search restarts, best assignment per shard |
+
+```bash
+gh workflow run solve.yml -f cnf_url=<raw-url> -f seconds=600 -f seed_base=1000
+gh run list --workflow=solve.yml --limit 1
+gh run download <run-id> -D results
+```
+
+Inputs: `cnf_url` (required, raw URL — a gist **web page** 404s, point at the
+exact revision), `warm` (optional 0/1 string), `seconds` (per-shard budget,
+default 600), `seed_base` (shard `i` uses `seed_base + i`).
+
+**Nothing from the farm is trusted on its own.** Shards upload whatever they
+found; the caller verifies the assignment against the original clauses. A shard
+that hits the limit exits non-zero and the workflow still uploads — a missing
+`best_*.bits` means it crashed, so treat a download with no model as a failed
+run and retrigger rather than as "unsat".
+
+Keep the matrix at 20 shards: that is the free-tier concurrency cap, and extra
+jobs just queue. `cdcl_run.py` carries the shard-to-config mapping and a watchdog
+thread, because `pysat`'s `solve()` has no native time limit. `kissat_model.py`
+converts Kissat's `v 1 -2 3 0` output to the 0/1 string form — the trailing `0`
+is a terminator, not a variable.
 
 ---
 

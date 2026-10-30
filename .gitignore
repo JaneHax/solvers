@@ -9,3 +9,12 @@ pow/sha256_prefix_nonce
 pow/keccak_prefix_nonce
 pow/keccak_challenge_nonce
 answer*.json
+
+# solver run artifacts
+rh/
+r2h/
+results/
+best_*.bits
+model_*.bits
+ls_*.err
+out_*.txt

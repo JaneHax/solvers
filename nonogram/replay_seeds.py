@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-BIN = "/root/scripts/solvd/solvd-solver/nonobp"
+BIN = os.environ.get("NONOBP", os.path.join(os.path.dirname(os.path.abspath(__file__)), "nonobp"))
 
 # seed, noise, maxfail, bpit, bpevery — measured on the 256-core box
 WINNERS = {

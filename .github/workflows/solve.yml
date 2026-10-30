@@ -1,0 +1,86 @@
+name: solve
+
+# Runs many independent weighted-local-search restarts of the same CNF in
+# parallel, one per matrix shard, and uploads the best assignment of each.
+# The caller downloads the artifacts and verifies the assignment against the
+# original clauses; nothing here is trusted as a result on its own.
+on:
+  workflow_dispatch:
+    inputs:
+      cnf_url:
+        description: Raw URL of the DIMACS CNF to solve
+        required: true
+      warm_url:
+        description: Optional raw URL of a 0/1 warm-start file
+        required: false
+        default: ''
+      seconds:
+        description: Per-shard search budget in seconds
+        required: false
+        default: '600'
+      seed_base:
+        description: Seed of shard 0 (shard i uses seed_base + i)
+        required: false
+        default: '1000'
+
+concurrency:
+  group: solve-${{ inputs.seed_base }}
+  cancel-in-progress: false
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch instance
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.cnf_url }}" -o instance.cnf
+          head -1 instance.cnf
+          wc -l instance.cnf
+
+      - name: Build solver
+        run: |
+          gcc -O3 -march=native -o wsatk sat/wsatk.c -lm
+          ./wsatk 2>&1 | head -1 || true
+
+      - name: Fetch warm start
+        if: inputs.warm_url != ''
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.warm_url }}" -o warm.bits
+          wc -c warm.bits
+
+      - name: Solve
+        run: |
+          SEED=$(( ${{ inputs.seed_base }} + ${{ matrix.shard }} ))
+          if [ -s warm.bits ]; then
+            W=warm.bits
+            echo "warm start: $(wc -c < warm.bits) bytes"
+          else
+            W=none.bits
+            echo "warm start: none (random init)"
+          fi
+          set +e
+          ./wsatk instance.cnf ${{ inputs.seconds }} "$SEED" "$W" "best_$SEED.bits" 2.8 \
+            > "out_$SEED.txt" 2> "err_$SEED.txt"
+          echo "exit=$?"
+          cat "err_$SEED.txt"
+          ls -la "best_$SEED.bits" 2>/dev/null || true
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            best_*.bits
+            err_*.txt
+          if-no-files-found: warn
+          retention-days: 1

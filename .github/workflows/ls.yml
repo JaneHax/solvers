@@ -1,0 +1,98 @@
+name: ls
+
+# Twenty parallel weighted-local-search shards on one instance. Local search is
+# the only class that gets close on balanced-1536 (23-29 unsatisfied clauses);
+# complete solvers (Cadical/Glucose/Minisat/MapleChrono/Kissat, 20 configs x 900 s)
+# never finish, so this workflow spends the entire budget on local search and
+# varies the clause-weight parameter and seed across shards instead.
+# Uploaded assignments are re-verified by the caller against the original clauses.
+on:
+  workflow_dispatch:
+    inputs:
+      cnf_url:
+        description: Raw URL of the DIMACS CNF
+        required: true
+      warm_url:
+        description: Optional raw URL of a 0/1 warm-start file
+        required: false
+        default: ''
+      seconds:
+        description: Local-search budget per shard
+        required: false
+        default: '480'
+      seed_base:
+        description: Seed of shard 0
+        required: false
+        default: '1000'
+
+concurrency:
+  group: ls-farm
+  cancel-in-progress: false
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch instance
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.cnf_url }}" -o instance.cnf
+          head -1 instance.cnf
+
+      - name: Fetch warm start
+        if: inputs.warm_url != ''
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.warm_url }}" -o warm.bits
+          wc -c warm.bits
+
+      - name: Build solver
+        run: gcc -O3 -march=native -o wsatk sat/wsatk.c -lm
+
+      - name: Solve
+        env:
+          SHARD: ${{ matrix.shard }}
+          BUDGET: ${{ inputs.seconds }}
+          SEED_BASE: ${{ inputs.seed_base }}
+        # cb (the probSAT break-count base) is rotated: measured on this class,
+        # 2.8 is the best single value, but the runner between 2.2 and 3.0 shifts
+        # which local optima a shard lands in, so a spread beats twenty identical
+        # runs. Shard 0..3 start from random to keep some exploration outside the
+        # warm basin; the rest start from the warm assignment.
+        run: |
+          S=$(( SEED_BASE + SHARD * 7919 ))
+          case $(( SHARD % 5 )) in
+            0) CB=2.2 ;;
+            1) CB=2.5 ;;
+            2) CB=2.8 ;;
+            3) CB=3.0 ;;
+            4) CB=2.8 ;;
+          esac
+          if [ -s warm.bits ] && [ "$SHARD" -ge 4 ]; then W=warm.bits; else W=none.bits; fi
+          echo "shard=$SHARD seed=$S cb=$CB start=$W"
+          set +e
+          INNER=$(( BUDGET - 3 ))
+          timeout --signal=KILL "$BUDGET" \
+            ./wsatk instance.cnf "$INNER" "$S" "$W" out_$SHARD.bits "$CB" \
+            > /dev/null 2> err_$SHARD.txt
+          echo "exit=$?"
+          cat err_$SHARD.txt || true
+          [ -s out_$SHARD.bits ] && echo "bytes $(wc -c < out_$SHARD.bits)"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ls-${{ matrix.shard }}
+          path: |
+            out_*.bits
+            err_*.txt
+          if-no-files-found: warn
+          retention-days: 1

@@ -1,0 +1,140 @@
+name: hybrid
+
+# Per shard: run weighted local search first, then Kissat, on the same instance.
+# Local search gets closest to a solution on planted 5-SAT (24-28 unsatisfied
+# clauses) while Kissat is the stronger complete search; running both in one job
+# uses the 20-job concurrency cap twice over without needing more slots.
+# Uploaded models are re-verified by the caller against the original clauses.
+on:
+  workflow_dispatch:
+    inputs:
+      cnf_url:
+        description: Raw URL of the DIMACS CNF
+        required: true
+      warm_url:
+        description: Optional raw URL of a 0/1 warm-start file
+        required: false
+        default: ''
+      ls_seconds:
+        description: Local-search budget per shard
+        required: false
+        default: '240'
+      kissat_seconds:
+        description: Kissat budget per shard
+        required: false
+        default: '420'
+      seed_base:
+        description: Seed of shard 0
+        required: false
+        default: '1000'
+
+concurrency:
+  group: hybrid-farm
+  cancel-in-progress: false
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch instance
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.cnf_url }}" -o instance.cnf
+          head -1 instance.cnf
+          awk '/^p cnf/ {print $3}' instance.cnf > nvars.txt
+
+      - name: Fetch warm start
+        if: inputs.warm_url != ''
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.warm_url }}" -o warm.bits
+          wc -c warm.bits
+
+      - name: Build local search
+        run: gcc -O3 -march=native -o wsatk sat/wsatk.c -lm
+
+      - name: Build Kissat
+        run: |
+          git clone --depth 1 https://github.com/arminbiere/kissat.git kissat-src
+          cd kissat-src
+          ./configure >/dev/null
+          make -j"$(nproc)" >/dev/null
+          ./build/kissat --version
+
+      - name: Local search
+        env:
+          SHARD: ${{ matrix.shard }}
+          LS_BUDGET: ${{ inputs.ls_seconds }}
+          SEED_BASE: ${{ inputs.seed_base }}
+        # Odd shards deliberately ignore the warm start and begin from a random
+        # assignment. Earlier random-start measurements used a binary that
+        # discarded its best record on every restart, so those numbers were
+        # pessimistic and cannot be trusted; this run measures both properly.
+        run: |
+          S=$(( SEED_BASE + SHARD * 7919 ))
+          if [ -s warm.bits ] && [ $(( SHARD % 2 )) -eq 0 ]; then
+            W=warm.bits
+            echo "start: warm"
+          else
+            W=none.bits
+            echo "start: random"
+          fi
+          set +e
+          # Internal limit is a few seconds below the external kill so wsatk can
+          # finish its own write path instead of racing the SIGKILL.
+          INNER=$(( LS_BUDGET - 3 ))
+          timeout --signal=KILL "$LS_BUDGET" \
+            ./wsatk instance.cnf "$INNER" "$S" "$W" ls_$SHARD.bits 2.8 \
+            > /dev/null 2> ls_$SHARD.err
+          echo "local exit=$?"
+          cat ls_$SHARD.err || true
+          [ -s ls_$SHARD.bits ] && echo "local best bytes $(wc -c < ls_$SHARD.bits)"
+
+      - name: Kissat
+        env:
+          SHARD: ${{ matrix.shard }}
+          K_BUDGET: ${{ inputs.kissat_seconds }}
+          SEED_BASE: ${{ inputs.seed_base }}
+        # Rotated presets: --sat targets satisfiable instances, which a planted
+        # puzzle is; the other variants vary restart/target strategy so the
+        # shards do not all search the same way.
+        run: |
+          S=$(( SEED_BASE + SHARD * 7919 ))
+          case $(( SHARD % 5 )) in
+            0) CFG="--sat" ;;
+            1) CFG="--sat --stable=2" ;;
+            2) CFG="--sat --walkinitially" ;;
+            3) CFG="--sat --target=2 --restartint=50" ;;
+            4) CFG="" ;;
+          esac
+          echo "shard=$SHARD seed=$S cfg=$CFG"
+          set +e
+          timeout --signal=KILL "$K_BUDGET" \
+            kissat-src/build/kissat $CFG --seed="$S" -q instance.cnf \
+            > out_$SHARD.txt 2> err_$SHARD.txt
+          echo "kissat exit=$?"
+          NV=$(cat nvars.txt)
+          # A shard that hits its budget has no model; that is expected, not a
+          # job failure, so the converter is allowed to fail quietly.
+          python sat/kissat_model.py out_$SHARD.txt "$NV" > model_$SHARD.bits \
+            && echo "model bytes $(wc -c < model_$SHARD.bits)" || true
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-${{ matrix.shard }}
+          path: |
+            ls_*.bits
+            model_*.bits
+            out_*.txt
+            ls_*.err
+          if-no-files-found: warn
+          retention-days: 1

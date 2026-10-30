@@ -1,0 +1,93 @@
+name: kissat
+
+# Runs Kissat (SAT Competition winner) on one CNF, one seed/configuration per
+# shard. Kissat is materially stronger than the pysat solvers on random k-SAT,
+# and the --sat preset is tuned specifically for satisfiable instances, which is
+# what a planted puzzle is. Each shard uploads its model when Kissat reports SAT;
+# the caller re-verifies every model against the original clauses before use.
+on:
+  workflow_dispatch:
+    inputs:
+      cnf_url:
+        description: Raw URL of the DIMACS CNF to solve
+        required: true
+      seconds:
+        description: Per-shard solver time limit in seconds
+        required: false
+        default: '900'
+      kissat_ref:
+        description: Kissat git ref to build
+        required: false
+        default: 'master'
+
+concurrency:
+  group: kissat-farm
+  cancel-in-progress: false
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - name: Fetch instance
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.cnf_url }}" -o instance.cnf
+          head -1 instance.cnf
+          # nvars comes from the DIMACS header, so the model converter knows the
+          # expected assignment length without hard-coding it.
+          awk '/^p cnf/ {print $3}' instance.cnf > nvars.txt
+          cat nvars.txt
+
+      - name: Build Kissat
+        run: |
+          git clone --depth 1 --branch "${{ inputs.kissat_ref }}" \
+            https://github.com/arminbiere/kissat.git kissat-src 2>/dev/null \
+            || git clone --depth 1 https://github.com/arminbiere/kissat.git kissat-src
+          cd kissat-src
+          ./configure >/dev/null
+          make -j"$(nproc)" >/dev/null
+          ./build/kissat --version
+
+      - name: Solve
+        env:
+          SHARD: ${{ matrix.shard }}
+          BUDGET: ${{ inputs.seconds }}
+        # Configurations are rotated per shard so the twenty shards cover
+        # distinct search strategies instead of repeating one. The seed makes
+        # each shard take a different path through the same strategy family.
+        run: |
+          S=$(( 1000 + SHARD * 7919 ))
+          case $(( SHARD % 5 )) in
+            0) CFG="--sat" ;;
+            1) CFG="--sat --stable=2" ;;
+            2) CFG="--sat --walkinitially" ;;
+            3) CFG="--sat --target=2 --restartint=50" ;;
+            4) CFG="" ;;
+          esac
+          echo "shard=$SHARD seed=$S cfg=$CFG"
+          set +e
+          timeout --signal=KILL "$BUDGET" \
+            kissat-src/build/kissat $CFG --seed="$S" -q instance.cnf \
+            > out_$SHARD.txt 2> err_$SHARD.txt
+          echo "exit=$?"
+          tail -2 err_$SHARD.txt || true
+          NV=$(cat nvars.txt)
+          python sat/kissat_model.py out_$SHARD.txt "$NV" > model_$SHARD.bits \
+            && echo "model length $(wc -c < model_$SHARD.bits)"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kissat-${{ matrix.shard }}
+          path: |
+            model_*.bits
+            out_*.txt
+          if-no-files-found: warn
+          retention-days: 1

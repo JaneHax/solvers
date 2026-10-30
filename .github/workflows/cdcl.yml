@@ -1,0 +1,69 @@
+name: cdcl
+
+# Runs complete SAT solvers (CDCL) on one CNF, one solver configuration per
+# shard. This is a different algorithm class from the local-search farm: local
+# search plateaus ~20 clauses short on balanced-1536, and only a complete search
+# can settle the remaining assignment. Each shard uploads its model when its
+# solver reports SAT; the caller re-verifies every model against the original
+# clauses before use.
+on:
+  workflow_dispatch:
+    inputs:
+      cnf_url:
+        description: Raw URL of the DIMACS CNF to solve
+        required: true
+      seconds:
+        description: Per-shard solver time limit in seconds
+        required: false
+        default: '900'
+
+concurrency:
+  group: cdcl-farm
+  cancel-in-progress: false
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install solvers
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet python-sat
+
+      - name: Fetch instance
+        run: |
+          curl -fsSL --retry 3 "${{ inputs.cnf_url }}" -o instance.cnf
+          head -1 instance.cnf
+
+      - name: Solve
+        env:
+          SHARD: ${{ matrix.shard }}
+          SECONDS_BUDGET: ${{ inputs.seconds }}
+        # The in-process watchdog proved unreliable (the solver kept running past
+        # its budget), so the hard stop is an external SIGKILL. Nothing is lost:
+        # the model is only written when the solver reports SAT.
+        run: |
+          timeout --signal=KILL "${SECONDS_BUDGET}" python -u sat/cdcl_run.py
+          echo "exit=$?"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdcl-${{ matrix.shard }}
+          path: model_*.bits
+          if-no-files-found: warn
+          retention-days: 1

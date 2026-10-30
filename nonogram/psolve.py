@@ -1,7 +1,6 @@
 # portfolio nonogram solver: N boards of any size; writes hex answer JSON
 import json,sys,time,subprocess,os,itertools
-sys.path.insert(0,'/workspace/solvd')
-BIN='/root/scripts/solvd/solvd-solver/nonobp'
+BIN=os.environ.get('NONOBP', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nonobp'))
 def runs(line):
     out=[];n=0
     for x in line:

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-BIN = "/opt/nonobp"
+BIN = os.environ.get("NONOBP", os.path.join(os.path.dirname(os.path.abspath(__file__)), "nonobp"))
 
 
 def runs(line):
