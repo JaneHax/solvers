@@ -1,4 +1,4 @@
-# mint-solvers
+# solvers
 
 Solvers for the computational gates that block NFT/token mints. Every tool here
 was built against a live campaign and is kept because it worked, not because it

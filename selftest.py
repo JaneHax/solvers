@@ -153,7 +153,7 @@ def test_sat(planted=True):
 
 
 def main():
-    print("mint-solvers selftest")
+    print("solvers selftest")
     results = [
         ("nonogram", test_nonogram),
         ("sliding", test_sliding),
