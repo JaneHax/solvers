@@ -1,0 +1,11 @@
+*.o
+*.cnf
+__pycache__/
+*.pyc
+nonogram/nonobp
+sat/wsatk
+sat/exactksat
+pow/sha256_prefix_nonce
+pow/keccak_prefix_nonce
+pow/keccak_challenge_nonce
+answer*.json
